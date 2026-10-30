@@ -55,11 +55,9 @@ make -C build -f ../Makefile -j"$(nproc)" wasm
 
 python3 tools/make_examples.py
 
-# The pinned upstream file is kept in build/; the site gets the patched copy
-# (see tools/patch_plotly.py).
 plotly=build/plotly-$PLOTLY_VERSION.min.js
 if ! echo "$PLOTLY_SHA256  $plotly" | sha256sum -c --status >/dev/null 2>&1; then
   curl -fsSL -o "$plotly" "https://cdn.jsdelivr.net/npm/plotly.js-dist-min@$PLOTLY_VERSION/plotly.min.js"
   echo "$PLOTLY_SHA256  $plotly" | sha256sum -c --quiet
 fi
-python3 tools/patch_plotly.py "$plotly" site/vendor/plotly.min.js
+cp "$plotly" site/vendor/plotly.min.js

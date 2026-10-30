@@ -2,6 +2,7 @@ import { parseTecplot, parseBoundary, draw } from './viewer.js';
 import { basename, dataFiles } from './control.js';
 import { Runner } from './runner.js';
 import { makeZip } from './zip.js';
+import { enablePinchZoom } from './pinch.js';
 
 const PREVIEW_DEBOUNCE_MS = 400;
 const PREVIEW_TIMEOUT_MS = 10000;
@@ -15,6 +16,8 @@ const els = {
   boundaryToggle: $('boundaryToggle'), boundaryToggleLabel: $('boundaryToggleLabel'),
   splitV: $('splitV'), splitH: $('splitH'), outputDot: $('outputDot'),
 };
+
+enablePinchZoom(els.plot);
 
 const mesher = new Runner('worker.js');
 const previewer = new Runner('worker.js');
@@ -301,8 +304,12 @@ async function runPreview() {
   const result = await previewer.run({ program: 'boundary', control, inputs }, { timeoutMs: PREVIEW_TIMEOUT_MS });
   if (result.superseded || result.stopped) return;
 
-  const ok = !result.crash && result.exitCode === 0 && result.files.boundary;
-  const { generator, curves } = ok ? parseBoundary(result.files.boundary.text) : { generator: 'none', curves: [] };
+  let generator = 'none', curves = [], parseError = null;
+  if (!result.crash && result.exitCode === 0 && result.files.boundary) {
+    // e.g. a parametric curve that evaluates to NaN somewhere.
+    try { ({ generator, curves } = parseBoundary(result.files.boundary.text)); } catch (e) { parseError = e.message; }
+  }
+  const ok = !result.crash && result.exitCode === 0 && result.files.boundary && !parseError;
   preview = { key, curves };
   if (meshing || key !== inputsKey(workspace.control.text, (await resolveInputs(workspace.control.text)).inputs)) return;
 
@@ -313,7 +320,7 @@ async function runPreview() {
     show({ boundary: curves, dim: generator === 'none' ? 2 : 3 }, `Boundary preview · ${kind}${what}`);
   } else {
     const lines = result.log ?? [];
-    const reason = lines.map(l => l.match(/message\s*=\s*(.*)/)?.[1]).find(Boolean)
+    const reason = parseError ?? lines.map(l => l.match(/message\s*=\s*(.*)/)?.[1]).find(Boolean)
       ?? lines.map(l => l.match(/fatal Fortran runtime error\(.*?\):\s*(.*)/)?.[1]).find(Boolean)
       ?? lines.map(l => l.match(/ERROR STOP:?\s*(.*)/)?.[1]).find(Boolean)
       ?? (result.crash ? cleanCrash(result.crash) : `exit ${result.exitCode}`);
@@ -350,22 +357,29 @@ async function run() {
 
   const generation = workspace.generation;
   const control = { ...workspace.control };
-  const { inputs, missing } = await resolveInputs(control.text);
-  for (const path of missing) appendLog(`Data file not found: ${path} (open it via "Open…" or drop it on the page)`, true);
-  const key = inputsKey(control.text, inputs);
-  // The preview runs in its own worker and takes milliseconds; start it alongside
-  // the mesh if the overlay would otherwise be stale.
-  const pendingPreview = preview.key === key ? null : runPreview();
+  let result, key;
+  // Whatever fails below, the run must end: otherwise Run stays "Stop" for good.
+  try {
+    const { inputs, missing } = await resolveInputs(control.text);
+    for (const path of missing) appendLog(`Data file not found: ${path} (open it via "Open…" or drop it on the page)`, true);
+    key = inputsKey(control.text, inputs);
+    // The preview runs in its own worker and takes milliseconds; start it alongside
+    // the mesh if the overlay would otherwise be stale.
+    const pendingPreview = preview.key === key ? null : runPreview();
 
-  const result = stopRequested
-    ? { crash: 'stopped by user', stopped: true, exitCode: -1, ms: 0, files: {}, outputs: [] }
-    : await mesher.run({ program: 'mesh', control: control.text, inputs }, { onLog: appendLog });
-  // Still `meshing` while the overlay preview finishes, so nothing can start or
-  // load in between and have this run's results painted over it.
-  await pendingPreview;
-  meshing = false;
-  clearInterval(ticker);
-  setRunning(false);
+    result = stopRequested
+      ? { crash: 'stopped by user', stopped: true, exitCode: -1, ms: 0, files: {}, outputs: [] }
+      : await mesher.run({ program: 'mesh', control: control.text, inputs }, { onLog: appendLog });
+    // Still `meshing` while the overlay preview finishes, so nothing can start or
+    // load in between and have this run's results painted over it.
+    await pendingPreview?.catch(() => {});
+  } catch (e) {
+    result = { crash: String(e?.message ?? e), exitCode: -1, ms: 0, files: {}, outputs: [] };
+  } finally {
+    meshing = false;
+    clearInterval(ticker);
+    setRunning(false);
+  }
   if (workspace.generation !== generation) {
     setStatus('stopped: another file or example was loaded', 'err');
     return;

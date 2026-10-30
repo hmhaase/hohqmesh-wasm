@@ -1,11 +1,13 @@
 // Runs the boundary-preview program on every bundled example and checks that
 // - it yields polylines (boundary curves, sweep curve, or the background grid box),
 // - extruded and rotated outlines span the same box as the mesh HOHQMesh generates,
-// - a broken control file is reported as an error rather than an empty model.
+// - a broken control file is reported as an error rather than an empty model,
+// - the walks drawn instead of NaN-separated lines (see toWalks) contain exactly the
+//   segments of the outlines and meshes, and only finite numbers.
 import createBoundaryPreview from '../site/boundary.js';
 import createHOHQMesh from '../site/hohqmesh.js';
 import { dataFiles, outputFiles } from '../site/control.js';
-import { parseBoundary, parseTecplot } from '../site/viewer.js';
+import { parseBoundary, parseTecplot, toWalks } from '../site/viewer.js';
 import fs from 'node:fs';
 
 const UPSTREAM = new URL('../HOHQMesh/', import.meta.url).pathname;
@@ -42,12 +44,30 @@ async function preview(control, files = {}) {
   return r;
 }
 
-async function meshBox(control, files = {}) {
+async function mesh(control, files = {}) {
   const plot = outputFiles(control).plot;
   const r = await run(createHOHQMesh, meshWasm, control, files, ['-f', '/in.control']);
-  const mesh = parseTecplot(r.m.FS.readFile(plot, { encoding: 'utf8' }));
-  return box([...mesh.lines.byMaterial.values()]);
+  return parseTecplot(r.m.FS.readFile(plot, { encoding: 'utf8' }));
 }
+
+function meshBox(parsed) {
+  const points = [...parsed.lines.byMaterial.values()].flat(2);
+  return box([{ x: points.map(q => q[0]), y: points.map(q => q[1]), z: points.map(q => q[2]) }]);
+}
+
+const segmentKey = (a, b) => [a, b].map(p => [0, 1, 2].map(k => (p[k] ?? 0).toFixed(8)).join(' ')).sort().join('|');
+
+function walksCover(polylines) {
+  const want = new Set(), got = new Set();
+  for (const pl of polylines) for (let i = 1; i < pl.length; i++) want.add(segmentKey(pl[i - 1], pl[i]));
+  for (const walk of toWalks(polylines)) {
+    if (!walk.every(p => [0, 1, 2].every(k => Number.isFinite(p[k] ?? 0)))) return false;
+    for (let i = 1; i < walk.length; i++) got.add(segmentKey(walk[i - 1], walk[i]));
+  }
+  return want.size === got.size && [...want].every(k => got.has(k));
+}
+
+const curvePolylines = curves => curves.map(c => c.x.map((_, i) => [c.x[i], c.y[i], c.z[i]]));
 
 function box(polylines) {
   return ['x', 'y', 'z'].map(k => {
@@ -62,18 +82,33 @@ for (const { name, control, files = {} } of examples) {
   const curves = parsed?.curves ?? [];
   let ok = exitCode === 0 && !crash && curves.length > 0;
   let detail = curves.length ? [...new Set(curves.map(c => c.kind))].join('+') : 'nothing';
+  for (const kind of new Set(curves.map(c => c.kind))) {
+    if (!walksCover(curvePolylines(curves.filter(c => c.kind === kind)))) { ok = false; detail += `, walks wrong for ${kind}`; }
+  }
   if (ok && ['extrusion', 'rotation'].includes(parsed.generator)) {
     const outline = box(curves);
-    const mesh = await meshBox(control, files);
+    const meshed = await mesh(control, files);
+    const meshExtent = meshBox(meshed);
     const match = outline.every(([lo, hi], i) => {
-      const tol = BOX_TOL * Math.max(mesh[i][1] - mesh[i][0], 1e-12);
-      return Math.abs(lo - mesh[i][0]) <= tol && Math.abs(hi - mesh[i][1]) <= tol;
+      const tol = BOX_TOL * Math.max(meshExtent[i][1] - meshExtent[i][0], 1e-12);
+      return Math.abs(lo - meshExtent[i][0]) <= tol && Math.abs(hi - meshExtent[i][1]) <= tol;
     });
-    ok &&= match;
+    const meshWalks = [...meshed.lines.byMaterial.values()].every(walksCover);
+    ok &&= match && meshWalks;
     detail += `, ${parsed.generator} outline ${match ? 'matches' : 'differs from'} mesh box`;
+    if (!meshWalks) detail += ', mesh walks wrong';
   }
   if (!ok) failures++;
   console.log(`${name.padEnd(30)} ${ok ? 'ok' : `FAIL exit ${exitCode} ${crash}`}  ${detail}`);
+}
+
+// One 2D mesh in both plot formats, multi-material.
+for (const format of ['skeleton', 'sem']) {
+  const ex = examples.find(e => e.name === '2D/BoneAndMarrow');
+  const parsed = await mesh(ex.control.replace(/plot file format = \w+/, `plot file format = ${format}`));
+  const ok = [...parsed.lines.byMaterial.values()].every(walksCover);
+  if (!ok) failures++;
+  console.log(`${`2D/BoneAndMarrow ${format} walks`.padEnd(30)} ${ok ? 'ok' : 'FAIL'}  ${parsed.lines.byMaterial.size} materials`);
 }
 
 const broken = await preview(examples[0].control.replace('\\begin{MODEL}', '\\begin{MODEL'));

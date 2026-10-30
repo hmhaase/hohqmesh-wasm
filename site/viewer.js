@@ -17,17 +17,79 @@ function intAfter(line, key) {
   return m ? Number(m[1]) : null;
 }
 
+// WebGL must never see NaN (see toWalks); Fortran writes **** for numbers that do
+// not fit, which would parse as NaN.
+function finite(values, what) {
+  if (!values.every(Number.isFinite)) throw new Error(`${what} contains a non-finite number (NaN or Fortran **** overflow)`);
+  return values;
+}
+
 // Fortran list-directed output drops the E for three-digit exponents (1.0-100).
 const numbers = line => line.trim().replace(/(\d)([-+]\d{3})(?=\s|,|$)/g, '$1e$2').split(/[\s,]+/).map(Number);
 
+// Point lists ([x, y, z]) grouped by material.
 class Polylines {
   constructor() { this.byMaterial = new Map(); }
   add(points, material = 0) {
-    if (!this.byMaterial.has(material)) this.byMaterial.set(material, { x: [], y: [], z: [] });
-    const t = this.byMaterial.get(material);
-    for (const p of points) { t.x.push(p[0]); t.y.push(p[1]); t.z.push(p[2]); }
-    t.x.push(null); t.y.push(null); t.z.push(null);
+    if (!this.byMaterial.has(material)) this.byMaterial.set(material, []);
+    this.byMaterial.get(material).push(points);
   }
+}
+
+// Joins polylines that share end points into continuous walks: a depth-first
+// traversal that runs along every polyline and back again. Plotly's WebGL traces
+// mark line breaks with NaN vertices, and GLSL ES leaves NaN undefined (GPUs may
+// treat it as 0, drawing every break as a line to one point), so the data handed
+// to WebGL must contain no breaks. Retraced segments are invisible.
+export function toWalks(polylines) {
+  // Same tolerance as the sem edge deduplication (pointKey).
+  const key = p => [p[0], p[1], p[2] ?? 0].map(v => v.toFixed(8)).join(' ');
+  const ends = polylines.map(pl => [key(pl[0]), key(pl[pl.length - 1])]);
+  const adjacent = new Map();
+  ends.forEach(([a, b], i) => {
+    for (const k of a === b ? [a] : [a, b]) {
+      if (!adjacent.has(k)) adjacent.set(k, []);
+      adjacent.get(k).push(i);
+    }
+  });
+  const used = new Uint8Array(polylines.length);
+  const walks = [];
+  for (let first = 0; first < polylines.length; first++) {
+    if (used[first]) continue;
+    const walk = [polylines[first][0]];
+    let forwardEnd = 1;
+    const stack = [{ node: ends[first][0], next: 0, back: null }];
+    while (stack.length) {
+      const top = stack[stack.length - 1];
+      const edges = adjacent.get(top.node);
+      while (top.next < edges.length && used[edges[top.next]]) top.next++;
+      if (top.next < edges.length) {
+        const e = edges[top.next];
+        used[e] = 1;
+        const forward = ends[e][0] === top.node ? polylines[e] : [...polylines[e]].reverse();
+        for (let i = 1; i < forward.length; i++) walk.push(forward[i]);
+        forwardEnd = walk.length;
+        stack.push({ node: key(forward[forward.length - 1]), next: 0, back: forward });
+      } else {
+        stack.pop();
+        if (top.back) for (let i = top.back.length - 2; i >= 0; i--) walk.push(top.back[i]);
+      }
+    }
+    // The final retrace back to the start draws nothing new (and would double dashes).
+    walk.length = forwardEnd;
+    walks.push(walk);
+  }
+  return walks;
+}
+
+// One Plotly trace per walk; the traces of a group share one legend entry.
+function walkTraces(polylines, dim, common) {
+  return toWalks(polylines).map((walk, i) => {
+    const t = { ...common, showlegend: i === 0, x: walk.map(p => p[0]), y: walk.map(p => p[1]) };
+    if (dim === 3) t.z = walk.map(p => p[2]);
+    if (common.text !== undefined) t.text = walk.map(p => p[3]);
+    return t;
+  });
 }
 
 function parseSkeleton(lines, start) {
@@ -37,7 +99,7 @@ function parseSkeleton(lines, start) {
   const isBrick = /ET\s*=\s*BRICK/i.test(header);
   const nodes = new Array(nNodes);
   let i = start + 1;
-  for (let k = 0; k < nNodes; k++) nodes[k] = numbers(lines[i++]);
+  for (let k = 0; k < nNodes; k++) nodes[k] = finite(numbers(lines[i++]), 'plot file');
 
   let quads = [];
   for (let k = 0; k < nElems; k++) {
@@ -79,7 +141,7 @@ function parseSem(lines, start) {
     const I = intAfter(header, 'I'), J = intAfter(header, 'J'), K = intAfter(header, 'K') ?? 1;
     const count = I * J * K;
     const pts = new Array(count);
-    for (let k = 0; k < count; k++) pts[k] = numbers(lines[i + 1 + k]);
+    for (let k = 0; k < count; k++) pts[k] = finite(numbers(lines[i + 1 + k]), 'plot file');
     i += 1 + count;
     nElems++;
     const mat = pts[0][3] ?? 0;
@@ -140,7 +202,7 @@ export function parseBoundary(text) {
       cur = { kind: header[1], label: header[2].trim(), x: [], y: [], z: [] };
       curves.push(cur);
     } else if (cur && line.trim()) {
-      const [x, y, z = 0] = numbers(line);
+      const [x, y, z = 0] = finite(numbers(line), 'boundary preview');
       cur.x.push(x);
       cur.y.push(y);
       cur.z.push(z);
@@ -162,20 +224,14 @@ const BOUNDARY_STYLE = {
 function boundaryTraces(curves, dim, width, visible) {
   const traces = [];
   for (const [kind, style] of Object.entries(BOUNDARY_STYLE)) {
-    const x = [], y = [], z = [], text = [];
-    for (const c of curves.filter(c => c.kind === kind)) {
-      x.push(...c.x, null);
-      y.push(...c.y, null);
-      z.push(...c.z, null);
-      text.push(...c.x.map(() => c.label), null);
-    }
-    if (!x.length) continue;
+    const polylines = curves.filter(c => c.kind === kind).map(c => c.x.map((_, i) => [c.x[i], c.y[i], c.z[i], c.label]));
+    if (!polylines.length) continue;
     // Plotly draws dashed scatter3d lines as scattered fragments; 3D stays solid.
     const line = { color: style.color, width: kind === 'rail' ? 1.5 : width, dash: dim === 3 ? undefined : style.dash };
-    const common = { mode: 'lines', text, name: style.name, line, visible };
-    traces.push(dim === 3
-      ? { ...common, type: 'scatter3d', x, y, z, hovertemplate: '%{text}<br>(%{x:.4g}, %{y:.4g}, %{z:.4g})<extra></extra>' }
-      : { ...common, type: 'scattergl', x, y, hovertemplate: '%{text}<br>(%{x:.4g}, %{y:.4g})<extra></extra>' });
+    traces.push(...walkTraces(polylines, dim, {
+      type: dim === 3 ? 'scatter3d' : 'scattergl', mode: 'lines', text: '', name: style.name, legendgroup: kind, line, visible,
+      hovertemplate: dim === 3 ? '%{text}<br>(%{x:.4g}, %{y:.4g}, %{z:.4g})<extra></extra>' : '%{text}<br>(%{x:.4g}, %{y:.4g})<extra></extra>',
+    }));
   }
   return traces;
 }
@@ -190,12 +246,13 @@ export function draw(el, scene, theme, { revision = 0, showBoundary = true } = {
   const traces = [];
   let c = 0;
   const multi = (mesh?.lines.byMaterial.size ?? 0) > 1;
-  for (const [mat, t] of mesh?.lines.byMaterial ?? []) {
+  for (const [mat, polylines] of mesh?.lines.byMaterial ?? []) {
     const color = multi ? PALETTE[c++ % PALETTE.length] : theme.line;
-    const common = { mode: 'lines', name: multi ? `material ${mat}` : 'mesh', hoverinfo: 'x+y' + (dim === 3 ? '+z' : '') };
-    traces.push(dim === 3
-      ? { ...common, type: 'scatter3d', x: t.x, y: t.y, z: t.z, line: { color, width: 2 } }
-      : { ...common, type: 'scattergl', x: t.x, y: t.y, line: { color, width: 1 } });
+    const name = multi ? `material ${mat}` : 'mesh';
+    traces.push(...walkTraces(polylines, dim, {
+      type: dim === 3 ? 'scatter3d' : 'scattergl', mode: 'lines', name, legendgroup: name,
+      hoverinfo: 'x+y' + (dim === 3 ? '+z' : ''), line: { color, width: dim === 3 ? 2 : 1 },
+    }));
   }
   traces.push(...boundaryTraces(boundary, dim, mesh ? 3 : 2, !mesh || showBoundary ? true : 'legendonly'));
   const axis = { gridcolor: theme.grid, zerolinecolor: theme.grid, color: theme.text };
@@ -204,7 +261,7 @@ export function draw(el, scene, theme, { revision = 0, showBoundary = true } = {
     plot_bgcolor: 'rgba(0,0,0,0)',
     font: { color: theme.text, family: 'inherit' },
     margin: { l: 40, r: 10, t: 10, b: 30 },
-    showlegend: traces.length > 1,
+    showlegend: new Set(traces.map(t => t.legendgroup)).size > 1,
     // On narrow plots a top legend collides with the toolbar.
     legend: el.clientWidth < 500 ? { orientation: 'h', x: 0, y: -0.12, yanchor: 'top' } : { orientation: 'h', y: 1.02, x: 0 },
     uirevision: revision,

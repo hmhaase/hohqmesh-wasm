@@ -99,7 +99,8 @@
   }
   pre .err { color: var(--err); }
   #plotPanel { flex: 1; }
-  #plot { flex: 1; min-height: 320px; }
+  /* Gestures on the plot belong to Plotly and pinch.js, not to page zoom/scroll. */
+  #plot { flex: 1; min-height: 320px; touch-action: none; }
   #plot .empty { height: 100%; display: grid; place-items: center; color: var(--muted); padding: 16px; text-align: center; }
   a.dl, button.link { color: var(--accent); text-decoration: none; font-size: 12px; }
   a.dl:hover, button.link:hover { text-decoration: underline; }

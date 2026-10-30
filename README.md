@@ -15,11 +15,10 @@ CDN at runtime.
 | `build.sh` | Build (`./build.sh`) and tests (`./build.sh test`); re-runs itself in the digest-pinned `ghcr.io/r-wasm/flang-wasm` image via podman or docker, locally and in CI |
 | `tools/BoundaryPreview.f90` | Small program that writes the geometry outline (boundary curves, sweep curve or background grid, in 3D mesh coordinates) with HOHQMesh's own classes and routines |
 | `tools/flangw.py`, `tools/inquire_shim.c` | Compiler workaround, see below |
-| `tools/patch_plotly.py` | Build-time fix for Plotly's WebGL line shaders, see below |
 | `tools/make_examples.py` | Bundles `HOHQMesh/Examples` and `examples/` into the site |
 | `examples/` | Examples of this repository; data files are referenced by bare name, as uploaded files are |
 | `patches/` | Applied to a copy of `FTObjectLibrary/Source` in `build/ftol` |
-| `site/` | Front end: `app.js` (UI), `runner.js` (killable workers), `worker.js` (runs a program per job), `control.js` (control-file keys), `viewer.js` (Tecplot/boundary parsing, Plotly), `zip.js`. Build outputs are git-ignored. `site/Examples/` mirrors the upstream layout so `file = Examples/...` paths resolve unchanged |
+| `site/` | Front end: `app.js` (UI), `runner.js` (killable workers), `worker.js` (runs a program per job), `control.js` (control-file keys), `viewer.js` (Tecplot/boundary parsing, Plotly), `pinch.js` (two-finger zoom), `zip.js`. Build outputs are git-ignored. `site/Examples/` mirrors the upstream layout so `file = Examples/...` paths resolve unchanged |
 | `tests/check_benchmarks.mjs` | Meshes all upstream benchmarks and compares with the reference data |
 | `tests/check_preview.mjs` | Runs the boundary preview on every example and on a broken control file, and checks 3D outlines against the generated meshes |
 
@@ -53,6 +52,8 @@ git add HOHQMesh FTObjectLibrary
 ```
 
 To move the toolchain, change `IMAGE` in `build.sh` (tag plus `@sha256:` digest).
+After changing `PLOTLY_VERSION`, also check pinch zoom on a touch device: `site/pinch.js` reads
+a few Plotly internals (marked there).
 
 ## Using the site
 
@@ -84,7 +85,10 @@ To move the toolchain, change `IMAGE` in `build.sh` (tag plus `@sha256:` digest)
   nodes, i.e. the skeleton output.
 - **Phones.** Below 760 px wide the page shows one panel at a time with an Editor / Plot /
   Output tab bar; a run shows Output while it runs and switches to Plot when it succeeds.
-- **View.** Drag pans and scroll zooms the 2D plot; the `boundary` checkbox hides the
+- **View.** Drag pans and scroll zooms the 2D plot; on touch screens two fingers pinch-zoom
+  and pan (Plotly has no pinch zoom outside maps,
+  [plotly.js#1858](https://github.com/plotly/plotly.js/issues/1858), so `pinch.js` maps the
+  gesture onto `Plotly.relayout`; in 3D it moves the camera); the `boundary` checkbox hides the
   boundary overlay on a mesh (2D and 3D). Panel borders can be dragged (double-click resets). The theme
   button cycles auto/light/dark. Ctrl+Enter runs. The header shows the HOHQMesh version and
   commit the site was built from and links to this repository.
@@ -111,21 +115,15 @@ computed from exactly the inputs that were meshed.
   pointer was declared `=> NULL()`, which implies `SAVE`. Nested finalization then nulls the
   descriptor the outer `DEALLOCATE` is still using. gfortran tolerates it, flang aborts.
   `patches/ftobjectlibrary-recursive-save.patch` fixes it; it should go upstream.
-- **Plotly WebGL lines on some mobile GPUs (no upstream fix yet).** `scattergl` draws lines
-  with regl-line2d, which encodes line breaks as NaN vertices. Its rect shader (lines up to
-  2 px) has no NaN check, its miter shader returns without writing `gl_Position`, and the
-  miter join turns a NaN neighbour point into NaN positions for the segments next to a
-  break. All of that is undefined in WebGL; on a phone in Chrome every break was
-  drawn as a line to a stray point. `tools/patch_plotly.py` patches the pinned,
-  checksum-verified `plotly.min.js`: segments with a NaN end point are moved outside the clip
-  volume and NaN neighbours are treated as line ends, using the NaN test the miter shader
-  already has (the patched shaders pass `glslangValidator`). The related upstream report,
-  [plotly.js#3522](https://github.com/plotly/plotly.js/issues/3522), was closed without a fix
-  for this cause, the changelog up to 4.2.0 has none, and this patch has not been reported
-  upstream yet. When updating Plotly, the build
-  fails if the shader text no longer matches: check whether upstream fixed it and drop the
-  patch, otherwise adapt it. `scatter3d` (gl-line3d) removes NaN segments on the CPU and is
-  not affected.
+- **Plotly WebGL lines on some mobile GPUs.** `scattergl` (regl-line2d) separates lines with
+  NaN vertices, but GLSL ES leaves NaN undefined: NaN support is optional and compilers may
+  fold it to 0 ([isnan reference](https://registry.khronos.org/OpenGL-Refpages/es3/html/isnan.xhtml)).
+  On a Pixel 9a (Firefox) every break was drawn as a line to the plot's corner, and a shader
+  patch with a NaN test did not help, since the test itself cannot be relied on. The viewer
+  therefore never hands WebGL a line break: `toWalks` in `site/viewer.js` joins the edges of
+  each connected part of the mesh or outline into one continuous path (running back along
+  edges where needed), one trace per part. `scatter3d` (gl-line3d) removes NaN segments on
+  the CPU and would be safe either way.
 - **`-test` is unusable.** The upstream test driver calls zero-argument routines through a
   one-argument procedure pointer, which wasm rejects at runtime. `tests/check_benchmarks.mjs`
   replaces it for the meshing benchmarks.
