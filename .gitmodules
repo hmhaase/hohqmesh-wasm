@@ -1,0 +1,6 @@
+[submodule "HOHQMesh"]
+	path = HOHQMesh
+	url = https://github.com/trixi-framework/HOHQMesh.git
+[submodule "FTObjectLibrary"]
+	path = FTObjectLibrary
+	url = https://github.com/trixi-framework/FTObjectLibrary.git

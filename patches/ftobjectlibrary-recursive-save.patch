@@ -1,0 +1,26 @@
+diff --git i/Source/FTObjects/FTLinkedListClass.f90 w/Source/FTObjects/FTLinkedListClass.f90
+index 20b83d8..5446de5 100644
+--- i/Source/FTObjects/FTLinkedListClass.f90
++++ w/Source/FTObjects/FTLinkedListClass.f90
+@@ -646,7 +646,7 @@
+          IMPLICIT NONE  
+          CLASS(FTLinkedList)                 :: self
+          INTEGER                             :: iUnit
+-         CLASS(FTLinkedListRecord), POINTER  :: listRecord => NULL()
++         CLASS(FTLinkedListRecord), POINTER  :: listRecord
+          LOGICAL                             :: circular
+          
+          IF(.NOT.ASSOCIATED(self % head)) RETURN
+diff --git i/Source/FTObjects/FTObjectArrayClass.f90 w/Source/FTObjects/FTObjectArrayClass.f90
+index e03daf6..bc2ad48 100644
+--- i/Source/FTObjects/FTObjectArrayClass.f90
++++ w/Source/FTObjects/FTObjectArrayClass.f90
+@@ -193,7 +193,7 @@
+        RECURSIVE SUBROUTINE destructObjectArray(self)  
+          IMPLICIT NONE
+          TYPE( FTMutableObjectArray)  :: self
+-         CLASS(FTObject), POINTER     :: obj     => NULL()
++         CLASS(FTObject), POINTER     :: obj
+          INTEGER                      :: i
+ 
+          DO i = 1, self % count_

@@ -1,0 +1,9 @@
+build/
+site/hohqmesh.js
+site/hohqmesh.wasm
+site/boundary.js
+site/boundary.wasm
+site/examples.json
+site/Examples/
+site/vendor/
+.claude/
