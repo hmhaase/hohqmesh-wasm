@@ -38,13 +38,13 @@ fi
   echo "submodules missing: git submodule update --init" >&2; exit 1; }
 
 # Patch a copy so the submodule stays clean; refresh it only when the sources or
-# patches change, since every refresh recompiles nearly everything.
+# patches change. cp -r gives the copy fresh mtimes, so make recompiles from it.
 ftol=build/ftol
 stamp=$(find FTObjectLibrary/Source patches -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
 if [ "$(cat "$ftol/.stamp" 2>/dev/null)" != "$stamp" ]; then
   rm -rf "$ftol"
   mkdir -p "$ftol"
-  cp -a FTObjectLibrary/Source "$ftol/"
+  cp -r FTObjectLibrary/Source "$ftol/"
   for p in patches/*.patch; do patch -d "$ftol" -p1 -s < "$p"; done
   echo "$stamp" > "$ftol/.stamp"
 fi
@@ -55,8 +55,11 @@ make -C build -f ../Makefile -j"$(nproc)" wasm
 
 python3 tools/make_examples.py
 
-plotly=site/vendor/plotly.min.js
+# The pinned upstream file is kept in build/; the site gets the patched copy
+# (see tools/patch_plotly.py).
+plotly=build/plotly-$PLOTLY_VERSION.min.js
 if ! echo "$PLOTLY_SHA256  $plotly" | sha256sum -c --status 2>/dev/null; then
   curl -fsSL -o "$plotly" "https://cdn.jsdelivr.net/npm/plotly.js-dist-min@$PLOTLY_VERSION/plotly.min.js"
   echo "$PLOTLY_SHA256  $plotly" | sha256sum -c --quiet
 fi
+python3 tools/patch_plotly.py "$plotly" site/vendor/plotly.min.js

@@ -32,17 +32,3 @@ export function resolvePath(cwd, p) {
   }
   return '/' + parts.join('/');
 }
-
-// The BACKGROUND_GRID box (x0, dx, N), shown when the control file has no MODEL.
-export function backgroundBox(control) {
-  const block = control.match(/\\begin\{BACKGROUND_GRID\}([\s\S]*?)\\end\{BACKGROUND_GRID\}/)?.[1];
-  if (!block) return null;
-  const vec = key => {
-    const m = block.match(new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*\\[([^\\]]*)\\]`, 'm'));
-    return m ? m[1].split(',').map(Number) : null;
-  };
-  const x0 = vec('x0'), dx = vec('dx'), n = vec('N');
-  if (!x0 || !dx || !n || [x0, dx, n].some(v => v.length < 2 || v.some(Number.isNaN))) return null;
-  const x1 = [x0[0] + n[0] * dx[0], x0[1] + n[1] * dx[1]];
-  return { x: [x0[0], x1[0], x1[0], x0[0], x0[0]], y: [x0[1], x0[1], x1[1], x1[1], x0[1]] };
-}

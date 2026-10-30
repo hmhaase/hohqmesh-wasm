@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>HOHQMesh in the Browser</title>
 <script>
   // Before first paint, so a stored theme never flashes the other one.
@@ -111,19 +111,47 @@
     font-size: 18px; color: var(--text); pointer-events: none;
   }
   body.dragging #dropOverlay { display: grid; }
-  @media (max-width: 860px) {
-    main { grid-template-columns: 1fr; gap: 12px; }
+  #viewTabs { display: none; }
+  #viewTabs .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--err); margin-left: 4px; vertical-align: middle; }
+  #viewTabs .dot[hidden] { display: none; }
+
+  /* Phones: one full-height panel at a time, switched by a bottom tab bar. */
+  @media (max-width: 760px) {
+    html, body { height: 100dvh; }
+    header { padding: 8px 12px; gap: 8px; }
+    h1 { font-size: 15px; }
+    h1 a { font-size: 11px; }
+    .controls { margin-left: 0; width: 100%; gap: 6px; }
+    #example { flex: 1 1 100%; min-width: 0; }
+    .controls > * { flex: 1 1 auto; }
+    #status { flex: 1 1 100%; min-width: 0; font-size: 12px; order: 10; }
+    select, button, label.file { padding: 8px 10px; min-height: 40px; }
+    main { display: flex; flex-direction: column; padding: 8px; gap: 0; }
     .splitter { display: none; }
-    .col { gap: 12px; }
-    #editorPanel { flex: none; height: 360px; }
-    #logPanel { flex: none; height: 220px; }
-    #plot { min-height: 420px; }
+    .col { flex: 1; min-height: 0; }
+    main .col, #editorPanel, #logPanel, #plotPanel { display: none; }
+    main[data-view="editor"] .col:first-child, main[data-view="output"] .col:first-child, main[data-view="plot"] .col:last-child { display: flex; }
+    main[data-view="editor"] #editorPanel, main[data-view="output"] #logPanel, main[data-view="plot"] #plotPanel { display: flex; flex: 1 1 auto; height: auto; }
+    #plot { min-height: 0; }
+    /* 16px keeps iOS from zooming the page when the editor gets focus. */
+    textarea { font-size: 16px; }
+    pre { font-size: 12px; }
+    .panel > .title { flex-wrap: wrap; }
+    #viewTabs {
+      display: flex; border-top: 1px solid var(--border); background: var(--panel);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    #viewTabs button {
+      flex: 1; border: 0; border-radius: 0; background: none; min-height: 48px;
+      color: var(--muted); font-weight: 600; border-top: 2px solid transparent;
+    }
+    #viewTabs button[aria-selected="true"] { color: var(--accent); border-top-color: var(--accent); }
   }
 </style>
 </head>
 <body>
 <header>
-  <h1>HOHQMesh <span>· WebAssembly</span><a id="version" target="_blank" rel="noopener"></a></h1>
+  <h1>HOHQMesh <span>· WebAssembly</span><a id="version" target="_blank" rel="noopener" title="HOHQMesh version and upstream commit"></a><a href="https://github.com/hmhaase/hohqmesh-wasm" target="_blank" rel="noopener" title="Source of this site">source</a></h1>
   <div class="controls">
     <select id="example" aria-label="Example"></select>
     <label class="file" title="Open a control file and/or data files (spline or topography). You can also drop files on the page.">
@@ -135,7 +163,7 @@
     <span id="status">loading…</span>
   </div>
 </header>
-<main>
+<main data-view="editor">
   <div class="col">
     <section class="panel" id="editorPanel">
       <div class="tabs" id="tabs" role="tablist"></div>
@@ -155,6 +183,11 @@
     </section>
   </div>
 </main>
+<nav id="viewTabs" role="tablist" aria-label="View">
+  <button role="tab" data-view="editor" aria-selected="true">Editor</button>
+  <button role="tab" data-view="plot" aria-selected="false">Plot</button>
+  <button role="tab" data-view="output" aria-selected="false">Output<span class="dot" id="outputDot" hidden></span></button>
+</nav>
 <div id="dropOverlay">Drop a .control file and/or data files</div>
 <script type="module" src="app.js"></script>
 </body>

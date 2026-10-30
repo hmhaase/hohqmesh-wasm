@@ -1,5 +1,5 @@
 import { parseTecplot, parseBoundary, draw } from './viewer.js';
-import { backgroundBox, basename, dataFiles } from './control.js';
+import { basename, dataFiles } from './control.js';
 import { Runner } from './runner.js';
 import { makeZip } from './zip.js';
 
@@ -13,7 +13,7 @@ const els = {
   log: $('log'), plot: $('plot'), downloads: $('downloads'), meshInfo: $('meshInfo'),
   open: $('open'), save: $('save'), theme: $('theme'), version: $('version'),
   boundaryToggle: $('boundaryToggle'), boundaryToggleLabel: $('boundaryToggleLabel'),
-  splitV: $('splitV'), splitH: $('splitH'),
+  splitV: $('splitV'), splitH: $('splitH'), outputDot: $('outputDot'),
 };
 
 const mesher = new Runner('worker.js');
@@ -29,6 +29,10 @@ const scrollPos = new Map();
 // Last preview result together with the inputs it was computed from, so a mesh is
 // only overlaid with the boundary of the same inputs.
 let preview = { key: null, curves: [] };
+// True from the moment Run is pressed, before the mesher worker is busy, so a Stop or
+// a workspace change while inputs are still being resolved is not missed.
+let meshing = false;
+let stopRequested = false;
 let lastView = null;
 let lastRun = null;
 let revision = 0;
@@ -97,7 +101,7 @@ function show(scene, info) {
 function redraw() {
   const { scene, info } = lastView;
   els.meshInfo.textContent = info;
-  els.boundaryToggleLabel.hidden = !(scene.mesh?.dim === 2 && scene.boundary?.length);
+  els.boundaryToggleLabel.hidden = !(scene.mesh && scene.boundary?.length);
   draw(els.plot, scene, plotTheme(), { revision, showBoundary: els.boundaryToggle.checked });
 }
 
@@ -191,7 +195,7 @@ function removeFile(name) {
 // Starts a new workspace; a mesh run for the old one is stopped so its results
 // cannot land on the new one.
 function resetWorkspace(controlName, controlText) {
-  if (mesher.busy) mesher.stop();
+  stopMeshing();
   workspace.generation++;
   workspace.files.clear();
   workspace.control = { name: controlName, text: controlText };
@@ -295,20 +299,23 @@ async function runPreview() {
   const { inputs } = await resolveInputs(control);
   const key = inputsKey(control, inputs);
   const result = await previewer.run({ program: 'boundary', control, inputs }, { timeoutMs: PREVIEW_TIMEOUT_MS });
-  if (result.superseded) return;
+  if (result.superseded || result.stopped) return;
 
   const ok = !result.crash && result.exitCode === 0 && result.files.boundary;
-  preview = { key, curves: ok ? parseBoundary(result.files.boundary.text) : [] };
-  if (mesher.busy || key !== inputsKey(workspace.control.text, (await resolveInputs(workspace.control.text)).inputs)) return;
+  const { generator, curves } = ok ? parseBoundary(result.files.boundary.text) : { generator: 'none', curves: [] };
+  preview = { key, curves };
+  if (meshing || key !== inputsKey(workspace.control.text, (await resolveInputs(workspace.control.text)).inputs)) return;
 
-  const box = backgroundBox(control);
   if (ok) {
-    const n = preview.curves.length;
-    show({ boundary: preview.curves, box }, `Boundary preview · ${n ? `${n} curves` : box ? 'no MODEL, background grid only' : 'no MODEL'}`);
+    const what = curves.some(c => c.kind === 'outer' || c.kind === 'inner' || c.kind === 'section') ? 'boundary curves'
+      : curves.some(c => c.kind === 'box') ? 'background grid (no boundary curves)' : 'no boundary curves';
+    const kind = generator === 'none' ? '' : generator === 'sweep' ? '3D sweep: cross-section and path · ' : `3D ${generator} · `;
+    show({ boundary: curves, dim: generator === 'none' ? 2 : 3 }, `Boundary preview · ${kind}${what}`);
   } else {
     const lines = result.log ?? [];
     const reason = lines.map(l => l.match(/message\s*=\s*(.*)/)?.[1]).find(Boolean)
       ?? lines.map(l => l.match(/fatal Fortran runtime error\(.*?\):\s*(.*)/)?.[1]).find(Boolean)
+      ?? lines.map(l => l.match(/ERROR STOP:?\s*(.*)/)?.[1]).find(Boolean)
       ?? (result.crash ? cleanCrash(result.crash) : `exit ${result.exitCode}`);
     showMessage('Fix the input files or press Run to see the full error', `Boundary preview failed: ${reason.trim()}`);
   }
@@ -320,13 +327,24 @@ function schedulePreview() {
   previewTimer = setTimeout(runPreview, PREVIEW_DEBOUNCE_MS);
 }
 
+function stopMeshing() {
+  if (!meshing) return;
+  stopRequested = true;
+  mesher.stop();
+  // A run waits for its overlay preview after meshing; Stop cancels that wait too.
+  previewer.stop();
+}
+
 async function run() {
-  if (mesher.busy) { mesher.stop(); return; }
+  if (meshing) { stopMeshing(); return; }
+  meshing = true;
+  stopRequested = false;
   clearTimeout(previewTimer);
   setRunning(true);
   els.log.textContent = '';
   clearDownloads();
   setStatus('meshing…');
+  if (phone.matches) setView('output');
   const t0 = performance.now();
   const ticker = setInterval(() => setStatus(`meshing… ${((performance.now() - t0) / 1000).toFixed(0)} s`), 1000);
 
@@ -339,14 +357,19 @@ async function run() {
   // the mesh if the overlay would otherwise be stale.
   const pendingPreview = preview.key === key ? null : runPreview();
 
-  const result = await mesher.run({ program: 'mesh', control: control.text, inputs }, { onLog: appendLog });
+  const result = stopRequested
+    ? { crash: 'stopped by user', stopped: true, exitCode: -1, ms: 0, files: {}, outputs: [] }
+    : await mesher.run({ program: 'mesh', control: control.text, inputs }, { onLog: appendLog });
+  // Still `meshing` while the overlay preview finishes, so nothing can start or
+  // load in between and have this run's results painted over it.
+  await pendingPreview;
+  meshing = false;
   clearInterval(ticker);
   setRunning(false);
   if (workspace.generation !== generation) {
     setStatus('stopped: another file or example was loaded', 'err');
     return;
   }
-  await pendingPreview;
   finish(result, control, preview.key === key ? preview.curves : []);
 }
 
@@ -361,6 +384,7 @@ function finish({ exitCode, crash, stopped, ms, files, outputs }, control, bound
     ok ? 'ok' : 'err',
   );
 
+  if (!ok && !stopped && phone.matches && document.querySelector('main').dataset.view !== 'output') els.outputDot.hidden = false;
   if (!files.plot) {
     showMessage(stopped ? 'Stopped' : ok ? 'No plot file written (plot file name = none?)' : 'Meshing failed, see output', 'Mesh');
     return;
@@ -369,6 +393,7 @@ function finish({ exitCode, crash, stopped, ms, files, outputs }, control, bound
     const mesh = parseTecplot(files.plot.text);
     const nodes = mesh.nNodes != null ? `${mesh.nNodes.toLocaleString()} nodes · ` : '';
     show({ mesh, boundary }, `${mesh.dim}D mesh · ${nodes}${mesh.nElems.toLocaleString()} elements`);
+    if (phone.matches && ok) setView('plot');
   } catch (e) {
     appendLog(`[viewer] ${e.message}`, true);
   }
@@ -377,13 +402,10 @@ function finish({ exitCode, crash, stopped, ms, files, outputs }, control, bound
 // ---------- examples ----------
 
 async function loadExamples() {
-  const { hohqmeshCommit, examples } = await (await fetch('examples.json')).json();
-  if (hohqmeshCommit) {
-    Object.assign(els.version, {
-      href: `https://github.com/trixi-framework/HOHQMesh/commit/${hohqmeshCommit}`,
-      textContent: `HOHQMesh ${hohqmeshCommit.slice(0, 7)}`,
-    });
-  }
+  const { hohqmeshVersion, hohqmeshCommit, examples } = await (await fetch('examples.json')).json();
+  const commit = hohqmeshCommit ? ` (${hohqmeshCommit.slice(0, 7)})` : '';
+  els.version.textContent = `HOHQMesh ${hohqmeshVersion ?? ''}${commit}`.trim();
+  if (hohqmeshCommit) els.version.href = `https://github.com/trixi-framework/HOHQMesh/commit/${hohqmeshCommit}`;
   els.example.appendChild(Object.assign(new Option('(opened file)', ''), { disabled: true, hidden: true }));
   const groups = {};
   for (const ex of examples) {
@@ -394,7 +416,9 @@ async function loadExamples() {
   const byName = Object.fromEntries(examples.map(e => [e.name, e]));
 
   const loadExample = async name => {
-    resetWorkspace(`${name.split('/')[1]}.control`, byName[name].control);
+    const ex = byName[name];
+    resetWorkspace(`${name.split('/')[1]}.control`, ex.control);
+    for (const [file, text] of Object.entries(ex.files ?? {})) workspace.files.set(file, text);
     await addReferencedData();
     runPreview();
   };
@@ -402,6 +426,22 @@ async function loadExamples() {
   els.example.value = examples[0].name;
   await loadExample(examples[0].name);
 }
+
+// ---------- phone layout ----------
+
+const phone = matchMedia('(max-width: 760px)');
+
+function setView(view) {
+  document.querySelector('main').dataset.view = view;
+  for (const b of document.querySelectorAll('#viewTabs button')) b.setAttribute('aria-selected', String(b.dataset.view === view));
+  if (view === 'output') els.outputDot.hidden = true;
+  // Plotly cannot measure a hidden panel: size it once visible, then redraw so the
+  // legend placement follows the new width. Both keep the user's zoom.
+  if (view === 'plot' && lastView) Plotly.Plots.resize(els.plot).then(() => { if (lastView) redraw(); });
+}
+
+for (const b of document.querySelectorAll('#viewTabs button')) b.onclick = () => setView(b.dataset.view);
+phone.addEventListener('change', () => { if (lastView) redraw(); });
 
 // ---------- resizable panels ----------
 
@@ -455,7 +495,7 @@ makeSplitter(els.splitH, '--editor-height', 'y', () => els.splitH.parentElement,
 
 els.editor.addEventListener('input', onEdit);
 document.addEventListener('keydown', e => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); if (!mesher.busy) run(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); if (!meshing) run(); }
   if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveActive(); }
 });
 

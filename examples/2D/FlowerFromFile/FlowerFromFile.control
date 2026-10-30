@@ -1,0 +1,57 @@
+%
+% A flower-shaped hole whose boundary is read from a spline data file.
+% The file is referenced by its bare name, so a file you open or drop on the
+% page with the same name (e.g. your own flower.txt) is used instead. Edit
+% the flower.txt tab to change the shape; the boundary preview updates.
+%
+% Spline data format: number of points, then one "t x y z" row per point,
+% t running from 0 to 1. For a closed curve the last point equals the first.
+%
+\begin{CONTROL_INPUT}
+
+   \begin{RUN_PARAMETERS}
+      mesh file name   = FlowerFromFile.mesh
+      plot file name   = FlowerFromFile.tec
+      stats file name  = FlowerFromFile.txt
+      mesh file format = ISM-V2
+      polynomial order = 4
+      plot file format = sem
+   \end{RUN_PARAMETERS}
+
+   \begin{BACKGROUND_GRID}
+      background grid size = [0.5,0.5,0.0]
+   \end{BACKGROUND_GRID}
+
+   \begin{SPRING_SMOOTHER}
+      smoothing            = ON
+      smoothing type       = LinearAndCrossbarSpring
+      number of iterations = 25
+   \end{SPRING_SMOOTHER}
+
+\end{CONTROL_INPUT}
+
+\begin{MODEL}
+
+   \begin{OUTER_BOUNDARY}
+      \begin{CIRCULAR_ARC}
+         name        = outer
+         units       = degrees
+         center      = [0.0,0.0,0.0]
+         radius      = 3.0
+         start angle = 0.0
+         end angle   = 360.0
+      \end{CIRCULAR_ARC}
+   \end{OUTER_BOUNDARY}
+
+   \begin{INNER_BOUNDARIES}
+      \begin{CHAIN}
+         name = Flower
+         \begin{SPLINE_CURVE}
+            name = petals
+            file = flower.txt
+         \end{SPLINE_CURVE}
+      \end{CHAIN}
+   \end{INNER_BOUNDARIES}
+
+\end{MODEL}
+\end{FILE}
